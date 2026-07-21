@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 import folium
+from folium.plugins import MarkerCluster
 from streamlit_folium import st_folium
 
 # ----------------------------------------------------
@@ -95,7 +96,7 @@ if page == "1. UHC 보장지수 개요":
         """)
 
 # ----------------------------------------------------
-# 페이지 2: 전세계 국가별 의료비 & UHC 지수 분석 (시각화 개선 버전)
+# 페이지 2: 전세계 국가별 의료비 & UHC 지수 분석
 # ----------------------------------------------------
 elif page == "2. 글로벌 의료비 vs UHC 서비스 보장지수":
     st.title("📊 전 세계 국가별 1인당 의료비 & UHC 서비스 보장지수")
@@ -294,11 +295,11 @@ elif page == "2. 글로벌 의료비 vs UHC 서비스 보장지수":
         st.error(f"World Bank API 접속 중 오류가 발생했습니다.\n\n상세 내용: {e}")
 
 # ----------------------------------------------------
-# 페이지 3: 대한민국 상급종합병원 분포도
+# 페이지 3: 대한민국 상급종합병원 분포도 (깔끔한 시각화 개선)
 # ----------------------------------------------------
 elif page == "3. 대한민국 상급종합병원 분포도":
     st.title("🏥 대한민국 제5기 상급종합병원 분포도 (47개소)")
-    st.caption("보건복지부 지정 제5기(2024년~2026년) 상급종합병원 현황입니다.")
+    st.caption("보건복지부 지정 제5기(2024년~2026년) 상급종합병원 현황입니다. 클러스터링 및 색상으로 깔끔하게 정돈되었습니다.")
     
     hospitals_data = [
         # 서울권 (14개)
@@ -373,11 +374,29 @@ elif page == "3. 대한민국 상급종합병원 분포도":
 
     df = pd.DataFrame(hospitals_data)
 
-    col_filter, col_metric = st.columns([2, 1])
+    # 권역별 색상 매핑
+    region_colors = {
+        "서울": "#E63946",
+        "경기서북": "#F4A261",
+        "경기남부": "#E76F51",
+        "강원": "#2A9D8F",
+        "충북": "#264653",
+        "충남": "#4A4E69",
+        "전북": "#9B5DE5",
+        "전남": "#F15BB5",
+        "경북": "#00BBF9",
+        "경남동부": "#00F5D4",
+        "경남서부": "#52B788"
+    }
+
+    col_filter, col_toggle, col_metric = st.columns([2, 2, 1])
     
     with col_filter:
         region_list = ["전체"] + list(df["region"].unique())
         selected_region = st.selectbox("진료권역 선택:", region_list)
+
+    with col_toggle:
+        use_cluster = st.toggle("밀집 지역 무더기 묶기 (Cluster)", value=True, help="체크하면 인접한 병원들을 숫자로 그룹화하여 깔끔하게 보여줍니다.")
 
     if selected_region != "전체":
         filtered_df = df[df["region"] == selected_region]
@@ -387,15 +406,29 @@ elif page == "3. 대한민국 상급종합병원 분포도":
     with col_metric:
         st.metric("해당 권역 병원 수", f"{len(filtered_df)}개소")
 
-    m = folium.Map(location=[36.3, 127.8], zoom_start=7, tiles="cartodbpositron")
+    # 지도 생성 (모던하고 깨끗한 CartoDB positron 타일)
+    m = folium.Map(location=[36.3, 127.8], zoom_start=7, tiles="CartoDB positron")
+
+    # 클러스터 적용 여부 선택
+    if use_cluster:
+        target_group = MarkerCluster().add_to(m)
+    else:
+        target_group = m
 
     for _, row in filtered_df.iterrows():
-        folium.Marker(
+        color = region_colors.get(row["region"], "#1D3557")
+        
+        # 깔끔한 서클 마커 사용
+        folium.CircleMarker(
             location=[row["lat"], row["lon"]],
-            popup=folium.Popup(f"<b>{row['name']}</b><br>권역: {row['region']}", max_width=200),
-            tooltip=row["name"],
-            icon=folium.Icon(color="red", icon="hospital-o", prefix="fa")
-        ).add_to(m)
+            radius=8,
+            color=color,
+            fill=True,
+            fill_color=color,
+            fill_opacity=0.8,
+            popup=folium.Popup(f"<div style='font-weight:bold; font-size:13px;'>{row['name']}</div><div style='color:gray;'>권역: {row['region']}</div>", max_width=200),
+            tooltip=f"{row['name']} ({row['region']})"
+        ).add_to(target_group)
 
     st_folium(m, width="100%", height=550)
 
