@@ -34,7 +34,14 @@ def _wb_get(path: str, params: dict, max_retries: int = 3, timeout: int = 20) ->
                 f"{WB_BASE}{path}", params=call_params, headers=HEADERS, timeout=timeout
             )
             res.raise_for_status()
-            return res.json()
+            body = res.json()
+            # World Bank API는 잘못된 요청도 200과 함께 message로 내려줄 때가 있음
+            if isinstance(body, list) and body and isinstance(body[0], dict) and "message" in body[0]:
+                msg = body[0]["message"][0].get("value", str(body[0]["message"]))
+                raise RuntimeError(f"World Bank API 오류 응답 ({path}): {msg}")
+            return body
+        except RuntimeError:
+            raise
         except Exception as e:  # noqa: BLE001
             last_err = e
             time.sleep(1.5 * (attempt + 1))
@@ -78,19 +85,27 @@ def load_country_list() -> pd.DataFrame:
 
 @st.cache_data(show_spinner="세계은행 지표를 불러오는 중...")
 def load_indicator(indicator_code: str) -> pd.DataFrame:
-    """국가별 가장 최근 값(mrnev=1)을 가져온다."""
-    data = _wb_get(f"/country/all/indicator/{indicator_code}", {"per_page": 20000, "mrnev": 1})
+    """국가별 값을 최근 30년 범위로 받아온 뒤, 국가마다 가장 최근 연도 값만 남긴다."""
+    data = _wb_get(
+        f"/country/all/indicator/{indicator_code}",
+        {"date": "1995:2026", "per_page": 20000},
+    )
     _, records = data
     rows = []
-    for r in records:
-        if r.get("value") is None:
+    for r in (records or []):
+        if r.get("value") is None or not r.get("countryiso3code"):
             continue
         rows.append({
             "iso3": r["countryiso3code"],
             "값": r["value"],
-            "연도": r["date"],
+            "연도": int(r["date"]),
         })
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    # 국가별로 가장 최근 연도의 값만 남김
+    df = df.sort_values("연도").drop_duplicates("iso3", keep="last").reset_index(drop=True)
+    return df
 
 
 @st.cache_data(show_spinner="데이터를 정리하는 중...")
