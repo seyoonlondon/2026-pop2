@@ -1,11 +1,15 @@
 import streamlit as st
 import pandas as pd
+import requests
 import folium
 from streamlit_folium import st_folium
+import plotly.express as px
 
-# 페이지 기본 설정
+# ----------------------------------------------------
+# 페이지 설정
+# ----------------------------------------------------
 st.set_page_config(
-    page_title="보건의료 및 상급종합병원 대시보드",
+    page_title="글로벌 보건의료 & 상급종합병원 대시보드",
     page_icon="🏥",
     layout="wide"
 )
@@ -15,19 +19,23 @@ st.set_page_config(
 # ----------------------------------------------------
 st.sidebar.title("📌 메뉴 Navigation")
 page = st.sidebar.radio(
-    "이동할 페이지를 선택하세요:",
-    ["UHC 보장지수 개요", "한국 상급종합병원 분포도"]
+    "페이지를 선택하세요:",
+    [
+        "1. UHC 보장지수 개요",
+        "2. 글로벌 의료비 vs UHC 서비스 보장지수",
+        "3. 대한민국 상급종합병원 분포도"
+    ]
 )
 
 # ----------------------------------------------------
 # 페이지 1: UHC 보장지수 안내
 # ----------------------------------------------------
-if page == "UHC 보장지수 개요":
+if page == "1. UHC 보장지수 개요":
     st.title("🌐 UHC 서비스 보장지수 (UHC Service Coverage Index)")
     
     st.markdown("""
     ### 💡 UHC(보편적 건강보장) 지수란?
-    **보편적 건강보장(Universal Health Coverage, UHC) 지수**는 WHO(세계보건기구)와 세계은행(World Bank)에서 공동으로 발표하는 핵심 보건 지표입니다. 
+    **보편적 건강보장(Universal Health Coverage, UHC) 지수**는 WHO(세계보건기구)와 세계은행(World Bank)에서 공동 평가하는 핵심 보건 지표입니다. 
     국민이 경제적 어려움 없이 필수적인 고품질 보건의료 서비스를 받을 수 있는 수준을 **0점에서 100점 사이**의 점수로 산출합니다.
     """)
     
@@ -50,13 +58,99 @@ if page == "UHC 보장지수 개요":
         """)
 
 # ----------------------------------------------------
-# 페이지 2: 대한민국 상급종합병원 분포도 (제5기, 47개소)
+# 페이지 2: 전세계 국가별 의료비 & UHC 지수 분석
 # ----------------------------------------------------
-elif page == "한국 상급종합병원 분포도":
+elif page == "2. 글로벌 의료비 vs UHC 서비스 보장지수":
+    st.title("📊 전 세계 국가별 1인당 의료비 & UHC 서비스 보장지수")
+    st.caption("World Bank API를 통해 최신 국가별 보건의료 데이터를 실시간 수집 및 비교합니다.")
+
+    # World Bank API 데이터 수집 함수 (연도 검색 후 최신값 추출)
+    @st.cache_data(ttl=3600)
+    def fetch_worldbank_data(indicator_code):
+        # 1995년~2026년 데이터 조회
+        url = f"https://api.worldbank.org/v2/country/all/indicator/{indicator_code}?date=1995:2026&per_page=20000&format=json"
+        res = requests.get(url)
+        if res.status_code != 200:
+            st.error(f"World Bank API 요청 실패 ({indicator_code}): HTTP status {res.status_code}")
+            return None
+        
+        data = res.json()
+        if len(data) < 2 or not data[1]:
+            st.error(f"World Bank API에서 데이터를 가져올 수 없습니다. 지표: {indicator_code}")
+            return None
+
+        # 데이터 변환 및 국가별 최신 데이터(Most Recent) 고르기
+        records = []
+        for entry in data[1]:
+            value = entry.get("value")
+            country_name = entry.get("country", {}).get("value")
+            country_id = entry.get("countryiso3code")
+            year = entry.get("date")
+            
+            # 대륙/연합체 등 비국가 요소 제외
+            if value is not None and country_id and len(country_id) == 3:
+                records.append({
+                    "country": country_name,
+                    "code": country_id,
+                    "year": int(year),
+                    "value": value
+                })
+
+        df = pd.DataFrame(records)
+        # 국가별로 가장 최근 연도 데이터만 필터링
+        df_latest = df.sort_values("year").groupby("code").last().reset_index()
+        return df_latest
+
+    with st.spinner("World Bank에서 최신 국가별 보건의료 데이터를 불러오는 중입니다..."):
+        # 1인당 의료비 (USD): SH.XPD.CHEX.PC.CD
+        df_health_exp = fetch_worldbank_data("SH.XPD.CHEX.PC.CD")
+        # UHC 보장지수 (0~100): SH_UHC_SCI (최신 World Bank 코드)
+        df_uhc = fetch_worldbank_data("SH_UHC_SCI")
+
+    if df_health_exp is not None and df_uhc is not None:
+        # 데이터 병합
+        df_merged = pd.merge(
+            df_health_exp[["code", "country", "value", "year"]].rename(columns={"value": "health_exp_usd", "year": "exp_year"}),
+            df_uhc[["code", "value", "year"]].rename(columns={"value": "uhc_index", "year": "uhc_year"}),
+            on="code",
+            how="inner"
+        )
+
+        st.subheader("📈 1인당 의료비 지출 대 UHC 서비스 보장지수 관계")
+        
+        # Plotly 산점도
+        fig = px.scatter(
+            df_merged,
+            x="health_exp_usd",
+            y="uhc_index",
+            hover_name="country",
+            hover_data=["exp_year", "uhc_year"],
+            log_x=True, # 의료비 격차가 크므로 로그 스케일 적용
+            labels={
+                "health_exp_usd": "1인당 연간 의료비 지출액 (USD, 로그 스케일)",
+                "uhc_index": "UHC 서비스 보장지수 (0~100)"
+            },
+            title="국가별 1인당 의료비 지출 vs UHC 서비스 보장지수 (원형 크기: UHC 지수)",
+            color="uhc_index",
+            color_continuous_scale="Viridis",
+            height=600
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        with st.expander("📋 국가별 상세 데이터 보기"):
+            st.dataframe(
+                df_merged[["country", "code", "health_exp_usd", "exp_year", "uhc_index", "uhc_year"]].sort_values(by="uhc_index", ascending=False),
+                use_container_width=True
+            )
+
+# ----------------------------------------------------
+# 페이지 3: 대한민국 상급종합병원 분포도 (제5기, 47개소)
+# ----------------------------------------------------
+elif page == "3. 대한민국 상급종합병원 분포도":
     st.title("🏥 대한민국 제5기 상급종합병원 분포도 (47개소)")
     st.caption("보건복지부 지정 제5기(2024년~2026년) 상급종합병원 현황입니다.")
     
-    # 상급종합병원 데이터셋 (47개소 대표 좌표)
+    # 상급종합병원 47개소 위치 데이터
     hospitals_data = [
         # 서울권 (14개)
         {"name": "강북삼성병원", "region": "서울", "lat": 37.5685, "lon": 126.9675},
@@ -130,7 +224,6 @@ elif page == "한국 상급종합병원 분포도":
 
     df = pd.DataFrame(hospitals_data)
 
-    # 필터링 UI
     col_filter, col_metric = st.columns([2, 1])
     
     with col_filter:
@@ -145,7 +238,6 @@ elif page == "한국 상급종합병원 분포도":
     with col_metric:
         st.metric("해당 권역 병원 수", f"{len(filtered_df)}개소")
 
-    # Folium 지도 그리기
     m = folium.Map(location=[36.3, 127.8], zoom_start=7, tiles="cartodbpositron")
 
     for _, row in filtered_df.iterrows():
@@ -156,9 +248,7 @@ elif page == "한국 상급종합병원 분포도":
             icon=folium.Icon(color="red", icon="hospital-o", prefix="fa")
         ).add_to(m)
 
-    # Streamlit 화면 출력
     st_folium(m, width="100%", height=550)
 
-    # 목록 데이터 프레임 출력
     with st.expander("📋 선택된 권역 병원 목록 확인하기"):
         st.dataframe(filtered_df[["name", "region"]], use_container_width=True)
