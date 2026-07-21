@@ -6,7 +6,7 @@ from streamlit_folium import st_folium
 import plotly.express as px
 
 # ----------------------------------------------------
-# 페이지 설정
+# 페이지 기본 설정
 # ----------------------------------------------------
 st.set_page_config(
     page_title="글로벌 보건의료 & 상급종합병원 대시보드",
@@ -28,7 +28,7 @@ page = st.sidebar.radio(
 )
 
 # ----------------------------------------------------
-# 페이지 1: UHC 보장지수 안내
+# 페이지 1: UHC 보장지수 개요
 # ----------------------------------------------------
 if page == "1. UHC 보장지수 개요":
     st.title("🌐 UHC 서비스 보장지수 (UHC Service Coverage Index)")
@@ -58,56 +58,54 @@ if page == "1. UHC 보장지수 개요":
         """)
 
 # ----------------------------------------------------
-# 페이지 2: 전세계 국가별 의료비 & UHC 지수 분석
+# 페이지 2: 전세계 국가별 의료비 & UHC 지수 분석 (속도 최적화 버전)
 # ----------------------------------------------------
 elif page == "2. 글로벌 의료비 vs UHC 서비스 보장지수":
     st.title("📊 전 세계 국가별 1인당 의료비 & UHC 서비스 보장지수")
     st.caption("World Bank API를 통해 최신 국가별 보건의료 데이터를 실시간 수집 및 비교합니다.")
 
-    # World Bank API 데이터 수집 함수 (연도 검색 후 최신값 추출)
-    @st.cache_data(ttl=3600)
-    def fetch_worldbank_data(indicator_code):
-        # 1995년~2026년 데이터 조회
-        url = f"https://api.worldbank.org/v2/country/all/indicator/{indicator_code}?date=1995:2026&per_page=20000&format=json"
-        res = requests.get(url)
-        if res.status_code != 200:
-            st.error(f"World Bank API 요청 실패 ({indicator_code}): HTTP status {res.status_code}")
-            return None
+    # 경량화된 World Bank API 수집 함수 (mrv=1 파라미터로 최신 1개 연도만 조회)
+    @st.cache_data(ttl=86400, show_spinner=False) # 24시간 캐시 유지
+    def fetch_worldbank_data_fast(indicator_code):
+        # mrv=1 : Most Recent Value 1개만 받아오므로 속도가 훨씬 빠름
+        url = f"https://api.worldbank.org/v2/country/all/indicator/{indicator_code}?mrv=1&per_page=500&format=json"
         
-        data = res.json()
-        if len(data) < 2 or not data[1]:
-            st.error(f"World Bank API에서 데이터를 가져올 수 없습니다. 지표: {indicator_code}")
+        try:
+            res = requests.get(url, timeout=10)
+            if res.status_code != 200:
+                return None
+            
+            data = res.json()
+            if len(data) < 2 or not data[1]:
+                return None
+
+            records = []
+            for entry in data[1]:
+                value = entry.get("value")
+                country_name = entry.get("country", {}).get("value")
+                country_id = entry.get("countryiso3code")
+                year = entry.get("date")
+                
+                # ISO 3자리 국가코드 항목만 추출 (지역/그룹 제외)
+                if value is not None and country_id and len(country_id) == 3:
+                    records.append({
+                        "country": country_name,
+                        "code": country_id,
+                        "year": year,
+                        "value": value
+                    })
+
+            return pd.DataFrame(records)
+        except Exception:
             return None
 
-        # 데이터 변환 및 국가별 최신 데이터(Most Recent) 고르기
-        records = []
-        for entry in data[1]:
-            value = entry.get("value")
-            country_name = entry.get("country", {}).get("value")
-            country_id = entry.get("countryiso3code")
-            year = entry.get("date")
-            
-            # 대륙/연합체 등 비국가 요소 제외
-            if value is not None and country_id and len(country_id) == 3:
-                records.append({
-                    "country": country_name,
-                    "code": country_id,
-                    "year": int(year),
-                    "value": value
-                })
+    with st.spinner("🚀 최신 보건의료 데이터를 빠르게 불러오는 중입니다..."):
+        # 1인당 의료비 지출 (USD): SH.XPD.CHEX.PC.CD
+        df_health_exp = fetch_worldbank_data_fast("SH.XPD.CHEX.PC.CD")
+        # UHC 보장지수 (0~100): SH_UHC_SCI
+        df_uhc = fetch_worldbank_data_fast("SH_UHC_SCI")
 
-        df = pd.DataFrame(records)
-        # 국가별로 가장 최근 연도 데이터만 필터링
-        df_latest = df.sort_values("year").groupby("code").last().reset_index()
-        return df_latest
-
-    with st.spinner("World Bank에서 최신 국가별 보건의료 데이터를 불러오는 중입니다..."):
-        # 1인당 의료비 (USD): SH.XPD.CHEX.PC.CD
-        df_health_exp = fetch_worldbank_data("SH.XPD.CHEX.PC.CD")
-        # UHC 보장지수 (0~100): SH_UHC_SCI (최신 World Bank 코드)
-        df_uhc = fetch_worldbank_data("SH_UHC_SCI")
-
-    if df_health_exp is not None and df_uhc is not None:
+    if df_health_exp is not None and df_uhc is not None and not df_health_exp.empty and not df_uhc.empty:
         # 데이터 병합
         df_merged = pd.merge(
             df_health_exp[["code", "country", "value", "year"]].rename(columns={"value": "health_exp_usd", "year": "exp_year"}),
@@ -118,19 +116,18 @@ elif page == "2. 글로벌 의료비 vs UHC 서비스 보장지수":
 
         st.subheader("📈 1인당 의료비 지출 대 UHC 서비스 보장지수 관계")
         
-        # Plotly 산점도
         fig = px.scatter(
             df_merged,
             x="health_exp_usd",
             y="uhc_index",
             hover_name="country",
             hover_data=["exp_year", "uhc_year"],
-            log_x=True, # 의료비 격차가 크므로 로그 스케일 적용
+            log_x=True, # 로그 스케일 적용
             labels={
                 "health_exp_usd": "1인당 연간 의료비 지출액 (USD, 로그 스케일)",
                 "uhc_index": "UHC 서비스 보장지수 (0~100)"
             },
-            title="국가별 1인당 의료비 지출 vs UHC 서비스 보장지수 (원형 크기: UHC 지수)",
+            title="국가별 1인당 의료비 지출 vs UHC 서비스 보장지수",
             color="uhc_index",
             color_continuous_scale="Viridis",
             height=600
@@ -142,15 +139,16 @@ elif page == "2. 글로벌 의료비 vs UHC 서비스 보장지수":
                 df_merged[["country", "code", "health_exp_usd", "exp_year", "uhc_index", "uhc_year"]].sort_values(by="uhc_index", ascending=False),
                 use_container_width=True
             )
+    else:
+        st.error("데이터를 불러오는 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.")
 
 # ----------------------------------------------------
-# 페이지 3: 대한민국 상급종합병원 분포도 (제5기, 47개소)
+# 페이지 3: 대한민국 상급종합병원 분포도
 # ----------------------------------------------------
 elif page == "3. 대한민국 상급종합병원 분포도":
     st.title("🏥 대한민국 제5기 상급종합병원 분포도 (47개소)")
     st.caption("보건복지부 지정 제5기(2024년~2026년) 상급종합병원 현황입니다.")
     
-    # 상급종합병원 47개소 위치 데이터
     hospitals_data = [
         # 서울권 (14개)
         {"name": "강북삼성병원", "region": "서울", "lat": 37.5685, "lon": 126.9675},
