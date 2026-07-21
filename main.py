@@ -1,3 +1,5 @@
+import time
+
 import requests
 import pandas as pd
 import plotly.express as px
@@ -11,6 +13,33 @@ WB_BASE = "https://api.worldbank.org/v2"
 # 세계은행 지표 코드
 IND_EXPENDITURE = "SH.XPD.CHEX.PC.CD"   # 1인당 경상 의료비 지출 (현재 US$)
 IND_UHC_INDEX = "SH.UHC.SRVS.CV.XD"     # UHC 필수서비스 보장지수 (0~100, 의료 수준 대리지표)
+
+# 일부 API는 기본 requests User-Agent를 차단하므로 브라우저처럼 위장
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+}
+
+
+def _wb_get(path: str, params: dict, max_retries: int = 3, timeout: int = 20) -> dict:
+    """World Bank API 호출 + 재시도. 실패 시 명확한 에러 메시지로 변환."""
+    call_params = {**params, "format": "json"}
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            res = requests.get(
+                f"{WB_BASE}{path}", params=call_params, headers=HEADERS, timeout=timeout
+            )
+            res.raise_for_status()
+            return res.json()
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            time.sleep(1.5 * (attempt + 1))
+    raise RuntimeError(f"World Bank API 요청 실패 ({path}): {last_err}")
+
 
 METRICS = {
     "평균 의료비 (1인당, US$)": {
@@ -33,9 +62,8 @@ METRICS = {
 @st.cache_data(show_spinner="국가 목록을 불러오는 중...")
 def load_country_list() -> pd.DataFrame:
     """실제 '국가'만 추려낸다 (World, 소득그룹 등 집계 항목 제외)."""
-    res = requests.get(f"{WB_BASE}/country", params={"format": "json", "per_page": 400})
-    res.raise_for_status()
-    _, records = res.json()
+    data = _wb_get("/country", {"per_page": 400})
+    _, records = data
     rows = []
     for r in records:
         if r.get("region", {}).get("value") == "Aggregates":
@@ -51,12 +79,8 @@ def load_country_list() -> pd.DataFrame:
 @st.cache_data(show_spinner="세계은행 지표를 불러오는 중...")
 def load_indicator(indicator_code: str) -> pd.DataFrame:
     """국가별 가장 최근 값(mrnev=1)을 가져온다."""
-    res = requests.get(
-        f"{WB_BASE}/country/all/indicator/{indicator_code}",
-        params={"format": "json", "per_page": 20000, "mrnev": 1},
-    )
-    res.raise_for_status()
-    _, records = res.json()
+    data = _wb_get(f"/country/all/indicator/{indicator_code}", {"per_page": 20000, "mrnev": 1})
+    _, records = data
     rows = []
     for r in records:
         if r.get("value") is None:
@@ -86,7 +110,19 @@ def main():
     st.title("전세계 국가별 평균 의료비 & 의료 수준")
     st.caption("데이터 출처: World Bank Open Data (국가별로 가장 최근 발표 연도 값 사용)")
 
-    df = build_dataset()
+    try:
+        df = build_dataset()
+    except RuntimeError as e:
+        st.error(
+            "World Bank API에서 데이터를 불러오지 못했어요. "
+            "일시적인 API 장애일 수 있으니 새로고침을 눌러 다시 시도해 주세요.\n\n"
+            f"오류 내용: {e}"
+        )
+        st.stop()
+
+    if df.empty:
+        st.error("데이터를 불러왔지만 병합 결과가 비어 있어요. API 응답 형식이 바뀌었을 수 있습니다.")
+        st.stop()
 
     metric_label = st.selectbox("지표 선택", list(METRICS.keys()))
     metric = METRICS[metric_label]
