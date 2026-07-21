@@ -1,108 +1,138 @@
 import requests
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
-st.set_page_config(page_title="전국 고령화 단계구분도", layout="wide")
+st.set_page_config(page_title="전세계 의료비 · 의료 수준", layout="wide")
 
-POP_URL = "https://raw.githubusercontent.com/greatsong/modudata/main/data/population_yearly.csv.gz"
-GEO_URL = "https://raw.githubusercontent.com/greatsong/modudata/main/data/boundaries/sigungu_kr.geojson"
-TARGET_YEAR = 2026
+WB_BASE = "https://api.worldbank.org/v2"
+
+# 세계은행 지표 코드
+IND_EXPENDITURE = "SH.XPD.CHEX.PC.CD"   # 1인당 경상 의료비 지출 (현재 US$)
+IND_UHC_INDEX = "SH.UHC.SRVS.CV.XD"     # UHC 필수서비스 보장지수 (0~100, 의료 수준 대리지표)
+
+METRICS = {
+    "평균 의료비 (1인당, US$)": {
+        "code": IND_EXPENDITURE,
+        "col": "의료비",
+        "color_scale": "Blues",
+        "hover_fmt": ":.0f",
+        "unit": "US$",
+    },
+    "전반적 의료 수준 (UHC 보장지수, 0~100)": {
+        "code": IND_UHC_INDEX,
+        "col": "의료수준",
+        "color_scale": "Greens",
+        "hover_fmt": ":.1f",
+        "unit": "점",
+    },
+}
 
 
-@st.cache_data(show_spinner="인구 데이터를 불러오는 중...")
-def load_population():
-    df = pd.read_csv(POP_URL, compression="gzip")
-    return df
-
-
-@st.cache_data(show_spinner="시군구 경계 데이터를 불러오는 중...")
-def load_geojson():
-    res = requests.get(GEO_URL)
+@st.cache_data(show_spinner="국가 목록을 불러오는 중...")
+def load_country_list() -> pd.DataFrame:
+    """실제 '국가'만 추려낸다 (World, 소득그룹 등 집계 항목 제외)."""
+    res = requests.get(f"{WB_BASE}/country", params={"format": "json", "per_page": 400})
     res.raise_for_status()
-    return res.json()
+    _, records = res.json()
+    rows = []
+    for r in records:
+        if r.get("region", {}).get("value") == "Aggregates":
+            continue
+        rows.append({
+            "iso3": r["id"],
+            "국가": r["name"],
+            "대륙": r.get("region", {}).get("value", ""),
+        })
+    return pd.DataFrame(rows)
 
 
-@st.cache_data(show_spinner="고령화율을 계산하는 중...")
-def compute_aging_ratio(df: pd.DataFrame, year: int) -> pd.DataFrame:
-    yearly = df[df["연도"] == year].copy()
+@st.cache_data(show_spinner="세계은행 지표를 불러오는 중...")
+def load_indicator(indicator_code: str) -> pd.DataFrame:
+    """국가별 가장 최근 값(mrnev=1)을 가져온다."""
+    res = requests.get(
+        f"{WB_BASE}/country/all/indicator/{indicator_code}",
+        params={"format": "json", "per_page": 20000, "mrnev": 1},
+    )
+    res.raise_for_status()
+    _, records = res.json()
+    rows = []
+    for r in records:
+        if r.get("value") is None:
+            continue
+        rows.append({
+            "iso3": r["countryiso3code"],
+            "값": r["value"],
+            "연도": r["date"],
+        })
+    return pd.DataFrame(rows)
 
-    # 동 단위 '코드'의 앞 5자리 = 시군구 코드
-    yearly["시군구코드"] = yearly["코드"].astype(str).str[:5]
 
-    # '계_'로 시작하는 모든 나이 열 = 전체 인구
-    total_cols = [c for c in yearly.columns if c.startswith("계_")]
+@st.cache_data(show_spinner="데이터를 정리하는 중...")
+def build_dataset() -> pd.DataFrame:
+    countries = load_country_list()
 
-    # 65세 이상 나이 열만 추출 ('계_65세' ~ '계_100세 이상')
-    def age_from_col(col: str):
-        age_str = col.replace("계_", "").replace("세 이상", "").replace("세", "")
-        try:
-            return int(age_str)
-        except ValueError:
-            return None
+    exp = load_indicator(IND_EXPENDITURE).rename(columns={"값": "의료비", "연도": "의료비_연도"})
+    uhc = load_indicator(IND_UHC_INDEX).rename(columns={"값": "의료수준", "연도": "의료수준_연도"})
 
-    old_cols = [c for c in total_cols if (age_from_col(c) is not None and age_from_col(c) >= 65)]
-
-    total_sum = yearly.groupby("시군구코드")[total_cols].sum().sum(axis=1)
-    old_sum = yearly.groupby("시군구코드")[old_cols].sum().sum(axis=1)
-
-    result = pd.DataFrame({
-        "총인구": total_sum,
-        "고령인구": old_sum,
-    })
-    result["고령화율"] = (result["고령인구"] / result["총인구"] * 100).round(2)
-    result = result.reset_index()  # 시군구코드 컬럼 복원
-    return result
+    df = countries.merge(exp, on="iso3", how="inner")
+    df = df.merge(uhc, on="iso3", how="inner")
+    df = df[df["iso3"].str.len() == 3]
+    return df.reset_index(drop=True)
 
 
 def main():
-    st.title("전국 고령화 단계구분도")
-    st.caption(f"{TARGET_YEAR}년 6월 기준, 시군구별 65세 이상 인구 비율")
+    st.title("전세계 국가별 평균 의료비 & 의료 수준")
+    st.caption("데이터 출처: World Bank Open Data (국가별로 가장 최근 발표 연도 값 사용)")
 
-    pop_df = load_population()
-    geojson = load_geojson()
-    ratio_df = compute_aging_ratio(pop_df, TARGET_YEAR)
+    df = build_dataset()
 
-    # geojson 속성에서 시군구명·시도명 매핑 (코드 기준, 문자열로 통일)
-    code_to_name = {}
-    for feature in geojson["features"]:
-        props = feature["properties"]
-        code_to_name[str(props["코드"])] = {
-            "시군구": props["시군구"],
-            "시도": props["시도"],
-        }
-
-    ratio_df["시군구코드"] = ratio_df["시군구코드"].astype(str)
-    ratio_df["시군구"] = ratio_df["시군구코드"].map(lambda c: code_to_name.get(c, {}).get("시군구", ""))
-    ratio_df["시도"] = ratio_df["시군구코드"].map(lambda c: code_to_name.get(c, {}).get("시도", ""))
+    metric_label = st.selectbox("지표 선택", list(METRICS.keys()))
+    metric = METRICS[metric_label]
+    col = metric["col"]
 
     fig = px.choropleth(
-        ratio_df,
-        geojson=geojson,
-        locations="시군구코드",
-        featureidkey="properties.코드",
-        color="고령화율",
-        color_continuous_scale="Reds",
-        hover_name="시군구",
-        hover_data={"고령화율": ":.2f", "시군구코드": False},
-        labels={"고령화율": "65세 이상 비율(%)"},
+        df,
+        locations="iso3",
+        locationmode="ISO-3",
+        color=col,
+        color_continuous_scale=metric["color_scale"],
+        hover_name="국가",
+        hover_data={col: metric["hover_fmt"], "iso3": False},
+        labels={col: metric_label},
     )
     fig.update_geos(
-        visible=False,      # 배경 지도(타일) 숨김, 경계만 표시
-        fitbounds="locations",
+        visible=False,
+        showcountries=True,
+        countrycolor="lightgray",
+        projection_type="natural earth",
     )
     fig.update_layout(
-        margin={"r": 0, "t": 0, "l": 0, "b": 0},
-        height=750,
-        coloraxis_colorbar=dict(title="고령화율(%)"),
+        margin={"r": 0, "t": 10, "l": 0, "b": 0},
+        height=650,
+        coloraxis_colorbar=dict(title=metric["unit"]),
     )
-
     st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("의료비 대비 의료 수준")
+    st.caption("가로축: 1인당 의료비(로그 스케일) · 세로축: UHC 보장지수 · 점 색상: 대륙")
+    scatter = px.scatter(
+        df,
+        x="의료비",
+        y="의료수준",
+        color="대륙",
+        hover_name="국가",
+        log_x=True,
+        labels={"의료비": "1인당 의료비 (US$, log)", "의료수준": "UHC 보장지수"},
+    )
+    scatter.update_layout(height=500, margin={"r": 0, "t": 10, "l": 0, "b": 0})
+    st.plotly_chart(scatter, use_container_width=True)
 
     with st.expander("데이터 표 보기"):
         st.dataframe(
-            ratio_df[["시도", "시군구", "시군구코드", "총인구", "고령인구", "고령화율"]]
-            .sort_values("고령화율", ascending=False)
+            df[["국가", "대륙", "의료비", "의료비_연도", "의료수준", "의료수준_연도"]]
+            .sort_values(col, ascending=False)
             .reset_index(drop=True)
         )
 
