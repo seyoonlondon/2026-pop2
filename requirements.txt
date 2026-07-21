@@ -1,2 +1,4 @@
-requests
-plotly
+streamlit
+pandas
+folium
+streamlit-folium
