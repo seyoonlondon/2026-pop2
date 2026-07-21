@@ -1,12 +1,13 @@
-import streamlit as st
-import pandas as pd
+import time
 import requests
+import pandas as pd
+import plotly.express as px
+import streamlit as st
 import folium
 from streamlit_folium import st_folium
-import plotly.express as px
 
 # ----------------------------------------------------
-# 페이지 기본 설정
+# 1. 페이지 및 상합 설정
 # ----------------------------------------------------
 st.set_page_config(
     page_title="글로벌 보건의료 & 상급종합병원 대시보드",
@@ -14,8 +15,44 @@ st.set_page_config(
     layout="wide"
 )
 
+WB_BASE = "https://api.worldbank.org/v2"
+
+# 세계은행 지표 코드 (최신 변경사항 반영)
+IND_EXPENDITURE = "SH.XPD.CHEX.PC.CD"  # 1인당 경상 의료비 지출 (현재 US$)
+IND_UHC_INDEX = "SH_UHC_SCI"           # UHC 서비스 보장지수 (0~100)
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+}
+
+# World Bank API 호출 전용 안전 함수 (재시도 + 헤더)
+def _wb_get(path: str, params: dict, max_retries: int = 3, timeout: int = 20) -> dict:
+    call_params = {**params, "format": "json"}
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            res = requests.get(
+                f"{WB_BASE}{path}", params=call_params, headers=HEADERS, timeout=timeout
+            )
+            res.raise_for_status()
+            body = res.json()
+            if isinstance(body, list) and body and isinstance(body[0], dict) and "message" in body[0]:
+                msg = body[0]["message"][0].get("value", str(body[0]["message"]))
+                raise RuntimeError(f"World Bank API 오류 응답 ({path}): {msg}")
+            return body
+        except RuntimeError:
+            raise
+        except Exception as e:
+            last_err = e
+            time.sleep(1.5 * (attempt + 1))
+    raise RuntimeError(f"World Bank API 요청 실패 ({path}): {last_err}")
+
 # ----------------------------------------------------
-# 사이드바 메뉴 구성
+# 2. 사이드바 메뉴 구성
 # ----------------------------------------------------
 st.sidebar.title("📌 메뉴 Navigation")
 page = st.sidebar.radio(
@@ -58,89 +95,86 @@ if page == "1. UHC 보장지수 개요":
         """)
 
 # ----------------------------------------------------
-# 페이지 2: 전세계 국가별 의료비 & UHC 지수 분석 (속도 최적화 버전)
+# 페이지 2: 전세계 국가별 의료비 & UHC 지수 분석
 # ----------------------------------------------------
 elif page == "2. 글로벌 의료비 vs UHC 서비스 보장지수":
     st.title("📊 전 세계 국가별 1인당 의료비 & UHC 서비스 보장지수")
-    st.caption("World Bank API를 통해 최신 국가별 보건의료 데이터를 실시간 수집 및 비교합니다.")
+    st.caption("World Bank Open Data에서 최신 데이터를 가져옵니다.")
 
-    # 경량화된 World Bank API 수집 함수 (mrv=1 파라미터로 최신 1개 연도만 조회)
-    @st.cache_data(ttl=86400, show_spinner=False) # 24시간 캐시 유지
-    def fetch_worldbank_data_fast(indicator_code):
-        # mrv=1 : Most Recent Value 1개만 받아오므로 속도가 훨씬 빠름
-        url = f"https://api.worldbank.org/v2/country/all/indicator/{indicator_code}?mrv=1&per_page=500&format=json"
+    @st.cache_data(show_spinner="국가 목록 및 대륙 정보를 불러오는 중...")
+    def load_country_list() -> pd.DataFrame:
+        data = _wb_get("/country", {"per_page": 400})
+        _, records = data
+        rows = []
+        for r in records:
+            if r.get("region", {}).get("value") == "Aggregates":
+                continue
+            rows.append({
+                "iso3": r["id"],
+                "국가": r["name"],
+                "대륙": r.get("region", {}).get("value", ""),
+            })
+        return pd.DataFrame(rows)
+
+    @st.cache_data(show_spinner="World Bank 지표 데이터를 수집 및 정리 중...")
+    def load_indicator(indicator_code: str) -> pd.DataFrame:
+        data = _wb_get(f"/country/all/indicator/{indicator_code}", {"date": "1995:2026", "per_page": 20000})
+        _, records = data
+        rows = []
+        for r in (records or []):
+            if r.get("value") is None or not r.get("countryiso3code"):
+                continue
+            rows.append({
+                "iso3": r["countryiso3code"],
+                "값": r["value"],
+                "연도": int(r["date"]),
+            })
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df
+        # 국가별로 가장 최근 연도 값만 유지
+        return df.sort_values("연도").drop_duplicates("iso3", keep="last").reset_index(drop=True)
+
+    @st.cache_data(ttl=86400, show_spinner="데이터 세트를 구성 중입니다...")
+    def build_dataset() -> pd.DataFrame:
+        countries = load_country_list()
+        exp = load_indicator(IND_EXPENDITURE).rename(columns={"값": "의료비", "연도": "의료비_연도"})
+        uhc = load_indicator(IND_UHC_INDEX).rename(columns={"값": "의료수준", "연도": "의료수준_연도"})
         
-        try:
-            res = requests.get(url, timeout=10)
-            if res.status_code != 200:
-                return None
-            
-            data = res.json()
-            if len(data) < 2 or not data[1]:
-                return None
+        df = countries.merge(exp, on="iso3", how="inner")
+        df = df.merge(uhc, on="iso3", how="inner")
+        df = df[df["iso3"].str.len() == 3]
+        return df.reset_index(drop=True)
 
-            records = []
-            for entry in data[1]:
-                value = entry.get("value")
-                country_name = entry.get("country", {}).get("value")
-                country_id = entry.get("countryiso3code")
-                year = entry.get("date")
-                
-                # ISO 3자리 국가코드 항목만 추출 (지역/그룹 제외)
-                if value is not None and country_id and len(country_id) == 3:
-                    records.append({
-                        "country": country_name,
-                        "code": country_id,
-                        "year": year,
-                        "value": value
-                    })
-
-            return pd.DataFrame(records)
-        except Exception:
-            return None
-
-    with st.spinner("🚀 최신 보건의료 데이터를 빠르게 불러오는 중입니다..."):
-        # 1인당 의료비 지출 (USD): SH.XPD.CHEX.PC.CD
-        df_health_exp = fetch_worldbank_data_fast("SH.XPD.CHEX.PC.CD")
-        # UHC 보장지수 (0~100): SH_UHC_SCI
-        df_uhc = fetch_worldbank_data_fast("SH_UHC_SCI")
-
-    if df_health_exp is not None and df_uhc is not None and not df_health_exp.empty and not df_uhc.empty:
-        # 데이터 병합
-        df_merged = pd.merge(
-            df_health_exp[["code", "country", "value", "year"]].rename(columns={"value": "health_exp_usd", "year": "exp_year"}),
-            df_uhc[["code", "value", "year"]].rename(columns={"value": "uhc_index", "year": "uhc_year"}),
-            on="code",
-            how="inner"
-        )
-
+    try:
+        df = build_dataset()
+        
         st.subheader("📈 1인당 의료비 지출 대 UHC 서비스 보장지수 관계")
+        st.caption("가로축: 1인당 의료비(로그 스케일) · 세로축: UHC 보장지수(0~100) · 색상: 대륙")
         
         fig = px.scatter(
-            df_merged,
-            x="health_exp_usd",
-            y="uhc_index",
-            hover_name="country",
-            hover_data=["exp_year", "uhc_year"],
-            log_x=True, # 로그 스케일 적용
-            labels={
-                "health_exp_usd": "1인당 연간 의료비 지출액 (USD, 로그 스케일)",
-                "uhc_index": "UHC 서비스 보장지수 (0~100)"
-            },
-            title="국가별 1인당 의료비 지출 vs UHC 서비스 보장지수",
-            color="uhc_index",
-            color_continuous_scale="Viridis",
-            height=600
+            df,
+            x="의료비",
+            y="의료수준",
+            color="대륙",
+            hover_name="국가",
+            hover_data=["의료비_연도", "의료수준_연도"],
+            log_x=True,
+            labels={"의료비": "1인당 의료비 (USD, log)", "의료수준": "UHC 보장지수 (0~100)"},
+            height=550
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        with st.expander("📋 국가별 상세 데이터 보기"):
+        with st.expander("📋 국가별 상세 데이터 표 보기"):
             st.dataframe(
-                df_merged[["country", "code", "health_exp_usd", "exp_year", "uhc_index", "uhc_year"]].sort_values(by="uhc_index", ascending=False),
+                df[["국가", "대륙", "의료비", "의료비_연도", "의료수준", "의료수준_연도"]]
+                .sort_values("의료수준", ascending=False)
+                .reset_index(drop=True),
                 use_container_width=True
             )
-    else:
-        st.error("데이터를 불러오는 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.")
+
+    except Exception as e:
+        st.error(f"World Bank API 접속 중 오류가 발생했습니다.\n\n상세 내용: {e}")
 
 # ----------------------------------------------------
 # 페이지 3: 대한민국 상급종합병원 분포도
