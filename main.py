@@ -95,11 +95,11 @@ if page == "1. UHC 보장지수 개요":
         """)
 
 # ----------------------------------------------------
-# 페이지 2: 전세계 국가별 의료비 & UHC 지수 분석 (지도 차트 추가)
+# 페이지 2: 전세계 국가별 의료비 & UHC 지수 분석 (시각화 개선 버전)
 # ----------------------------------------------------
 elif page == "2. 글로벌 의료비 vs UHC 서비스 보장지수":
     st.title("📊 전 세계 국가별 1인당 의료비 & UHC 서비스 보장지수")
-    st.caption("World Bank Open Data에서 수집한 최신 지표를 지도 및 산점도로 분석합니다.")
+    st.caption("World Bank Open Data 기반 직관적 시각화 리포트입니다.")
 
     @st.cache_data(show_spinner="국가 목록 및 대륙 정보를 불러오는 중...")
     def load_country_list() -> pd.DataFrame:
@@ -132,7 +132,6 @@ elif page == "2. 글로벌 의료비 vs UHC 서비스 보장지수":
         df = pd.DataFrame(rows)
         if df.empty:
             return df
-        # 가장 최근 연도 값 유지
         return df.sort_values("연도").drop_duplicates("iso3", keep="last").reset_index(drop=True)
 
     @st.cache_data(ttl=86400, show_spinner="데이터 세트를 구성 중입니다...")
@@ -149,57 +148,141 @@ elif page == "2. 글로벌 의료비 vs UHC 서비스 보장지수":
     try:
         df = build_dataset()
         
-        # 🗺️ 1. 전 세계 지도 차트 (Choropleth Map)
-        st.subheader("🗺️ 전 세계 UHC 서비스 보장지수 지도")
-        st.caption("색상이 진할수록 보편적 건강보장(UHC) 수준이 높은 국가입니다. 마우스를 올리면 상세 정보를 확인할 수 있습니다.")
-        
+        # 🗺️ 1. 전 세계 지도 차트
+        st.subheader("🗺️ 1. 전 세계 UHC 서비스 보장지수 지도")
         fig_map = px.choropleth(
             df,
             locations="iso3",
             color="의료수준",
             hover_name="국가",
-            hover_data={
-                "iso3": False,
-                "의료수준": ":.1f점",
-                "의료비": ":$,.0f",
-                "의료수준_연도": True,
-                "의료비_연도": True
-            },
+            hover_data={"iso3": False, "의료수준": ":.1f점", "의료비": ":$,.0f"},
             color_continuous_scale="Viridis",
-            labels={
-                "의료수준": "UHC 지수 (0~100)",
-                "의료비": "1인당 의료비 (USD)",
-                "의료수준_연도": "UHC 조사연도",
-                "의료비_연도": "의료비 조사연도"
-            },
+            labels={"의료수준": "UHC 지수", "의료비": "1인당 의료비(USD)"},
             projection="natural earth",
-            height=550
+            height=480
         )
         fig_map.update_geos(showframe=False, showcoastlines=True, coastlinecolor="gray")
-        fig_map.update_layout(margin={"r":0,"t":10,"l":0,"b":0})
+        fig_map.update_layout(margin={"r":0,"t":0,"l":0,"b":0})
         st.plotly_chart(fig_map, use_container_width=True)
 
         st.markdown("---")
 
-        # 📈 2. 의료비 대비 UHC 상관관계 산점도
-        st.subheader("📈 1인당 의료비 지출 대 UHC 서비스 보장지수 관계")
-        st.caption("가로축: 1인당 의료비(로그 스케일) · 세로축: UHC 보장지수(0~100) · 색상: 대륙")
+        # 🏆 2. UHC 보장지수 최상위 & 최하위 국가 Top 10
+        st.subheader("🏆 2. UHC 서비스 보장지수 Top 10 vs Bottom 10 국가")
         
-        fig_scatter = px.scatter(
-            df,
-            x="의료비",
-            y="의료수준",
-            color="대륙",
-            hover_name="국가",
-            hover_data=["의료비_연도", "의료수준_연도"],
-            log_x=True,
-            labels={"의료비": "1인당 의료비 (USD, log)", "의료수준": "UHC 보장지수 (0~100)"},
-            height=550
-        )
-        st.plotly_chart(fig_scatter, use_container_width=True)
+        top10 = df.sort_values("의료수준", ascending=False).head(10)
+        bottom10 = df.sort_values("의료수준", ascending=True).head(10)
 
-        # 📋 3. 상세 데이터 표
-        with st.expander("📋 국가별 상세 데이터 표 보기"):
+        col_top, col_bot = st.columns(2)
+
+        with col_top:
+            st.markdown("##### 🥇 UHC 보장지수 최상위 10개국")
+            fig_top = px.bar(
+                top10,
+                x="의료수준",
+                y="국가",
+                orientation="h",
+                text="의료수준",
+                color="의료수준",
+                color_continuous_scale="Blues",
+                labels={"의료수준": "UHC 지수", "국가": ""},
+                height=400
+            )
+            fig_top.update_layout(yaxis={"categoryorder": "total ascending"}, showlegend=False, coloraxis_showscale=False)
+            fig_top.update_traces(texttemplate="%{text:.1f}점", textposition="outside")
+            st.plotly_chart(fig_top, use_container_width=True)
+
+        with col_bot:
+            st.markdown("##### ⚠️ UHC 보장지수 최하위 10개국")
+            fig_bot = px.bar(
+                bottom10,
+                x="의료수준",
+                y="국가",
+                orientation="h",
+                text="의료수준",
+                color="의료수준",
+                color_continuous_scale="Reds_r",
+                labels={"의료수준": "UHC 지수", "국가": ""},
+                height=400
+            )
+            fig_bot.update_layout(yaxis={"categoryorder": "total descending"}, showlegend=False, coloraxis_showscale=False)
+            fig_bot.update_traces(texttemplate="%{text:.1f}점", textposition="outside")
+            st.plotly_chart(fig_bot, use_container_width=True)
+
+        st.markdown("---")
+
+        # 🌍 3. 대륙별 평균 UHC 지수 & 의료비 비교
+        st.subheader("🌍 3. 대륙별 평균 UHC 지수 및 1인당 의료비 지출")
+        
+        df_region = df.groupby("대륙").agg(
+            평균_UHC=("의료수준", "mean"),
+            평균_의료비=("의료비", "mean"),
+            국가수=("iso3", "count")
+        ).reset_index().sort_values("평균_UHC", ascending=False)
+
+        col_reg1, col_reg2 = st.columns(2)
+
+        with col_reg1:
+            fig_reg_uhc = px.bar(
+                df_region,
+                x="대륙",
+                y="평균_UHC",
+                color="대륙",
+                text="평균_UHC",
+                title="대륙별 평균 UHC 보장지수 (0~100)",
+                labels={"평균_UHC": "평균 UHC 지수"},
+                height=380
+            )
+            fig_reg_uhc.update_traces(texttemplate="%{text:.1f}점", textposition="outside")
+            fig_reg_uhc.update_layout(showlegend=False)
+            st.plotly_chart(fig_reg_uhc, use_container_width=True)
+
+        with col_reg2:
+            fig_reg_exp = px.bar(
+                df_region,
+                x="대륙",
+                y="평균_의료비",
+                color="대륙",
+                text="평균_의료비",
+                title="대륙별 평균 1인당 의료비 지출 (USD)",
+                labels={"평균_의료비": "평균 의료비 ($)"},
+                height=380
+            )
+            fig_reg_exp.update_traces(texttemplate="$%{text:,.0f}", textposition="outside")
+            fig_reg_exp.update_layout(showlegend=False)
+            st.plotly_chart(fig_reg_exp, use_container_width=True)
+
+        st.markdown("---")
+
+        # 💵 4. 1인당 의료비 지출 구간별 평균 UHC 지수
+        st.subheader("💵 4. 1인당 의료비 지출 구간별 평균 UHC 보장지수")
+        st.caption("의료비 지출 수준에 따라 UHC 보장지수가 어떻게 변하는지 구간별로 비교합니다.")
+
+        bins = [-1, 500, 1500, 3000, 5000, 100000]
+        labels = ["$500 미만", "$500 ~ $1,500", "$1,500 ~ $3,000", "$3,000 ~ $5,000", "$5,000 이상"]
+        df["의료비_구간"] = pd.cut(df["의료비"], bins=bins, labels=labels)
+
+        df_bins = df.groupby("의료비_구간", observed=True).agg(
+            평균_UHC=("의료수준", "mean"),
+            국가수=("iso3", "count")
+        ).reset_index()
+
+        fig_bin = px.bar(
+            df_bins,
+            x="의료비_구간",
+            y="평균_UHC",
+            text="평균_UHC",
+            color="평균_UHC",
+            color_continuous_scale="Viridis",
+            labels={"의료비_구간": "1인당 의료비 지출 구간", "평균_UHC": "평균 UHC 지수"},
+            height=400
+        )
+        fig_bin.update_traces(texttemplate="%{text:.1f}점", textposition="outside")
+        fig_bin.update_layout(coloraxis_showscale=False)
+        st.plotly_chart(fig_bin, use_container_width=True)
+
+        # 📋 5. 상세 데이터 표
+        with st.expander("📋 전체 국가별 상세 데이터 표 보기"):
             st.dataframe(
                 df[["국가", "대륙", "의료비", "의료비_연도", "의료수준", "의료수준_연도"]]
                 .sort_values("의료수준", ascending=False)
