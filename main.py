@@ -12,7 +12,7 @@ WB_BASE = "https://api.worldbank.org/v2"
 
 # 세계은행 지표 코드
 IND_EXPENDITURE = "SH.XPD.CHEX.PC.CD"   # 1인당 경상 의료비 지출 (현재 US$)
-IND_UHC_INDEX = "SH.UHC.SRVS.CV.XD"     # UHC 필수서비스 보장지수 (0~100, 의료 수준 대리지표)
+IND_UHC_INDEX = "SH_UHC_SCI"            # UHC 서비스 보장지수 (0~100, 의료 수준 대리지표) — 구 코드 SH.UHC.SRVS.CV.XD는 폐기됨
 
 # 일부 API는 기본 requests User-Agent를 차단하므로 브라우저처럼 위장
 HEADERS = {
