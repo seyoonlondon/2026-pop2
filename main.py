@@ -7,7 +7,7 @@ import folium
 from streamlit_folium import st_folium
 
 # ----------------------------------------------------
-# 1. 페이지 및 상합 설정
+# 1. 페이지 및 기본 설정
 # ----------------------------------------------------
 st.set_page_config(
     page_title="글로벌 보건의료 & 상급종합병원 대시보드",
@@ -17,7 +17,7 @@ st.set_page_config(
 
 WB_BASE = "https://api.worldbank.org/v2"
 
-# 세계은행 지표 코드 (최신 변경사항 반영)
+# 세계은행 지표 코드
 IND_EXPENDITURE = "SH.XPD.CHEX.PC.CD"  # 1인당 경상 의료비 지출 (현재 US$)
 IND_UHC_INDEX = "SH_UHC_SCI"           # UHC 서비스 보장지수 (0~100)
 
@@ -29,7 +29,7 @@ HEADERS = {
     "Accept": "application/json",
 }
 
-# World Bank API 호출 전용 안전 함수 (재시도 + 헤더)
+# World Bank API 안전 호출 함수
 def _wb_get(path: str, params: dict, max_retries: int = 3, timeout: int = 20) -> dict:
     call_params = {**params, "format": "json"}
     last_err = None
@@ -95,11 +95,11 @@ if page == "1. UHC 보장지수 개요":
         """)
 
 # ----------------------------------------------------
-# 페이지 2: 전세계 국가별 의료비 & UHC 지수 분석
+# 페이지 2: 전세계 국가별 의료비 & UHC 지수 분석 (지도 차트 추가)
 # ----------------------------------------------------
 elif page == "2. 글로벌 의료비 vs UHC 서비스 보장지수":
     st.title("📊 전 세계 국가별 1인당 의료비 & UHC 서비스 보장지수")
-    st.caption("World Bank Open Data에서 최신 데이터를 가져옵니다.")
+    st.caption("World Bank Open Data에서 수집한 최신 지표를 지도 및 산점도로 분석합니다.")
 
     @st.cache_data(show_spinner="국가 목록 및 대륙 정보를 불러오는 중...")
     def load_country_list() -> pd.DataFrame:
@@ -132,7 +132,7 @@ elif page == "2. 글로벌 의료비 vs UHC 서비스 보장지수":
         df = pd.DataFrame(rows)
         if df.empty:
             return df
-        # 국가별로 가장 최근 연도 값만 유지
+        # 가장 최근 연도 값 유지
         return df.sort_values("연도").drop_duplicates("iso3", keep="last").reset_index(drop=True)
 
     @st.cache_data(ttl=86400, show_spinner="데이터 세트를 구성 중입니다...")
@@ -149,10 +149,43 @@ elif page == "2. 글로벌 의료비 vs UHC 서비스 보장지수":
     try:
         df = build_dataset()
         
+        # 🗺️ 1. 전 세계 지도 차트 (Choropleth Map)
+        st.subheader("🗺️ 전 세계 UHC 서비스 보장지수 지도")
+        st.caption("색상이 진할수록 보편적 건강보장(UHC) 수준이 높은 국가입니다. 마우스를 올리면 상세 정보를 확인할 수 있습니다.")
+        
+        fig_map = px.choropleth(
+            df,
+            locations="iso3",
+            color="의료수준",
+            hover_name="국가",
+            hover_data={
+                "iso3": False,
+                "의료수준": ":.1f점",
+                "의료비": ":$,.0f",
+                "의료수준_연도": True,
+                "의료비_연도": True
+            },
+            color_continuous_scale="Viridis",
+            labels={
+                "의료수준": "UHC 지수 (0~100)",
+                "의료비": "1인당 의료비 (USD)",
+                "의료수준_연도": "UHC 조사연도",
+                "의료비_연도": "의료비 조사연도"
+            },
+            projection="natural earth",
+            height=550
+        )
+        fig_map.update_geos(showframe=False, showcoastlines=True, coastlinecolor="gray")
+        fig_map.update_layout(margin={"r":0,"t":10,"l":0,"b":0})
+        st.plotly_chart(fig_map, use_container_width=True)
+
+        st.markdown("---")
+
+        # 📈 2. 의료비 대비 UHC 상관관계 산점도
         st.subheader("📈 1인당 의료비 지출 대 UHC 서비스 보장지수 관계")
         st.caption("가로축: 1인당 의료비(로그 스케일) · 세로축: UHC 보장지수(0~100) · 색상: 대륙")
         
-        fig = px.scatter(
+        fig_scatter = px.scatter(
             df,
             x="의료비",
             y="의료수준",
@@ -163,8 +196,9 @@ elif page == "2. 글로벌 의료비 vs UHC 서비스 보장지수":
             labels={"의료비": "1인당 의료비 (USD, log)", "의료수준": "UHC 보장지수 (0~100)"},
             height=550
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig_scatter, use_container_width=True)
 
+        # 📋 3. 상세 데이터 표
         with st.expander("📋 국가별 상세 데이터 표 보기"):
             st.dataframe(
                 df[["국가", "대륙", "의료비", "의료비_연도", "의료수준", "의료수준_연도"]]
